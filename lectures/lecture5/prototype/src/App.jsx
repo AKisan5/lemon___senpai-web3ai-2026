@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 
-const API = 'http://localhost:3001'
-const STORAGE_KEY = 'obsidian-kanban-tasks'
-const VAULT_NAME = 'my-vault'
+const OBSIDIAN_API = 'http://localhost:27123'
+const TASKS_PATH = 'Tasks'
+const API_KEY_STORAGE = 'obsidian-local-rest-api-key'
 
 const COLUMNS = [
   { key: 'todo',        label: 'To Do',      color: '#718096', bg: '#F7FAFC' },
@@ -24,188 +24,297 @@ const PRIORITIES = {
   low:    { label: '低', color: '#38A169' },
 }
 
+const VAULT_NAME = 'my-vault'
+
+// ─── YAML frontmatter parser ──────────────────────────────────────────────
+function parseFrontmatter(content) {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/)
+  if (!match) return { frontmatter: {}, body: content }
+
+  const fm = {}
+  const lines = match[1].split(/\r?\n/)
+  let currentKey = null
+  let listItems = []
+  let inList = false
+
+  const flush = () => {
+    if (inList && currentKey) { fm[currentKey] = listItems; listItems = []; inList = false }
+  }
+
+  for (const line of lines) {
+    if (inList && /^  - /.test(line)) {
+      listItems.push(line.slice(4))
+      continue
+    }
+    flush()
+    const m = line.match(/^(\w[\w_-]*): ?(.*)$/)
+    if (!m) continue
+    const [, key, val] = m
+    currentKey = key
+    if (val === '' || val === '[]') {
+      inList = true; listItems = []
+    } else {
+      fm[key] = val.replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1')
+    }
+  }
+  flush()
+
+  return { frontmatter: fm, body: match[2].trim() }
+}
+
+function generateMarkdown(task) {
+  const today = new Date().toISOString().split('T')[0]
+  const tags = Array.isArray(task.tags) && task.tags.length > 0
+    ? '\ntags:\n' + task.tags.map(t => `  - ${t}`).join('\n')
+    : ''
+  const aiCtx = (task.ai_context || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+
+  return `---
+id: ${task.id}
+title: ${task.title}
+deadline: ${task.deadline}
+status: ${task.status}
+assignee: ${task.assignee}
+priority: ${task.priority}
+ai_context: "${aiCtx}"${tags}
+created: ${task.created || today}
+updated: ${today}
+---
+
+## メモ
+
+${task.memo || ''}
+`
+}
+
+// ─── Obsidian Local REST API helpers ─────────────────────────────────────
+function obsFetch(path, apiKey, options = {}) {
+  return fetch(`${OBSIDIAN_API}/${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      ...options.headers,
+    },
+  })
+}
+
+async function listTaskFiles(apiKey) {
+  const res = await obsFetch(`vault/${TASKS_PATH}/`, apiKey)
+  if (!res.ok) throw new Error(`list failed: ${res.status}`)
+  const data = await res.json()
+  return (data.files || []).filter(f => !f.startsWith('_') && f.endsWith('.md'))
+}
+
+async function readTask(apiKey, filename) {
+  const res = await obsFetch(`vault/${TASKS_PATH}/${filename}`, apiKey)
+  if (!res.ok) return null
+  const text = await res.text()
+  const { frontmatter, body } = parseFrontmatter(text)
+  if (!frontmatter.id) return null
+  return { ...frontmatter, memo: body, _filename: filename }
+}
+
+async function writeTask(apiKey, task) {
+  const filename = task._filename || `${task.id}.md`
+  const md = generateMarkdown(task)
+  const res = await obsFetch(`vault/${TASKS_PATH}/${filename}`, apiKey, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'text/markdown' },
+    body: md,
+  })
+  if (!res.ok) throw new Error(`write failed: ${res.status}`)
+  return filename
+}
+
+async function deleteTaskFile(apiKey, filename) {
+  const res = await obsFetch(`vault/${TASKS_PATH}/${filename}`, apiKey, { method: 'DELETE' })
+  if (!res.ok) throw new Error(`delete failed: ${res.status}`)
+}
+
+// ─── Utilities ─────────────────────────────────────────────────────────────
 function daysLeft(deadline) {
   const today = new Date(); today.setHours(0, 0, 0, 0)
   return Math.ceil((new Date(deadline) - today) / 86400000)
 }
 function urgencyColor(days) {
-  if (days < 0)  return '#718096'
+  if (days < 0)   return '#718096'
   if (days === 0) return '#E53E3E'
   if (days <= 2)  return '#DD6B20'
   if (days <= 7)  return '#D69E2E'
   return '#38A169'
 }
 function urgencyLabel(days) {
-  if (days < 0)  return `${Math.abs(days)}日超過`
+  if (days < 0)   return `${Math.abs(days)}日超過`
   if (days === 0) return '今日締切！'
   if (days === 1) return '明日締切'
   return `あと${days}日`
 }
-
 function normalizeStatus(task) {
   if (task.status) return task.status
   return task.done ? 'done' : 'todo'
 }
-
-// 参照元（ファイルパス / wikilink）を Obsidian で開く URI に変換
 function obsidianUri(src) {
   const file = String(src).replace(/^(\.\.\/)+/, '').replace(/^\/+/, '')
   return `obsidian://open?vault=${encodeURIComponent(VAULT_NAME)}&file=${encodeURIComponent(file)}`
 }
-
-// 参照元の表示ラベル（末尾の .md を落とす）
 function sourceLabel(src) {
   return String(src).replace(/\.md$/, '')
 }
 
-export default function App() {
-  const [tasks, setTasks]                 = useState([])
-  const [title, setTitle]                 = useState('')
-  const [deadline, setDeadline]           = useState('')
-  const [assignee, setAssignee]           = useState('human')
-  const [priority, setPriority]           = useState('medium')
-  const [aiContext, setAiContext]         = useState('')
-  const [error, setError]                 = useState('')
-  const [loading, setLoading]             = useState(true)
-  const [showForm, setShowForm]           = useState(false)
-  const [filterAssignee, setFilter]       = useState('all')
-  const [expandedId, setExpandedId]       = useState(null)
-  const [isLocalStorageMode, setIsLocal]  = useState(false) // 自動デモモード
+// ─── API Key Setup Screen ──────────────────────────────────────────────────
+function ApiKeySetup({ onSave }) {
+  const [key, setKey] = useState('')
+  const [error, setError] = useState('')
+  const [testing, setTesting] = useState(false)
 
-  // タスクの初期読み込み
-  async function fetchTasks() {
+  async function handleSubmit(e) {
+    e.preventDefault()
+    if (!key.trim()) { setError('APIキーを入力してください'); return }
+    setTesting(true)
+    setError('')
     try {
-      const res = await fetch(`${API}/tasks`)
-      if (!res.ok) throw new Error()
-      setTasks(await res.json())
-      setIsLocal(false)
+      const res = await obsFetch(`vault/${TASKS_PATH}/`, key.trim())
+      if (res.ok || res.status === 404) {
+        localStorage.setItem(API_KEY_STORAGE, key.trim())
+        onSave(key.trim())
+      } else if (res.status === 401) {
+        setError('APIキーが正しくありません')
+      } else {
+        setError(`接続エラー (${res.status})。ObsidianとLocal REST APIプラグインが起動しているか確認してください`)
+      }
     } catch {
-      // 接続失敗時に localStorage デモモードへ移行（プライバシー安全確保）
-      setIsLocal(true)
-      const localData = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]')
-      setTasks(localData)
+      setError('Obsidianに接続できません。Local REST APIプラグインが有効か確認してください（Obsidian設定 → コミュニティプラグイン → Local REST API）')
     } finally {
-      setLoading(false)
+      setTesting(false)
     }
   }
 
-  useEffect(() => {
-    fetchTasks()
-  }, [])
+  return (
+    <div style={{ minHeight: '100vh', background: '#F0F2F5', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: '-apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif' }}>
+      <div style={{ background: '#fff', borderRadius: 16, padding: 40, maxWidth: 480, width: '100%', boxShadow: '0 4px 24px rgba(0,0,0,0.10)' }}>
+        <div style={{ fontSize: 32, marginBottom: 8, textAlign: 'center' }}>🔐</div>
+        <h2 style={{ fontSize: 20, fontWeight: 700, textAlign: 'center', marginBottom: 8, color: '#1A202C' }}>Obsidian 接続設定</h2>
+        <p style={{ fontSize: 13, color: '#718096', textAlign: 'center', marginBottom: 24, lineHeight: 1.6 }}>
+          Obsidian Local REST API のAPIキーを入力してください。<br />
+          <span style={{ color: '#A0AEC0' }}>Obsidian設定 → Local REST API → API Key</span>
+        </p>
+        <form onSubmit={handleSubmit}>
+          <input
+            type="password"
+            placeholder="APIキーを貼り付け"
+            value={key}
+            onChange={e => setKey(e.target.value)}
+            style={{ width: '100%', padding: '10px 14px', fontSize: 14, border: '1px solid #CBD5E0', borderRadius: 8, outline: 'none', boxSizing: 'border-box', marginBottom: 12 }}
+            autoFocus
+          />
+          {error && <p style={{ color: '#E53E3E', fontSize: 13, marginBottom: 12 }}>{error}</p>}
+          <button
+            type="submit"
+            disabled={testing}
+            style={{ width: '100%', padding: '10px', fontWeight: 700, fontSize: 14, background: testing ? '#A0AEC0' : '#3182CE', color: '#fff', border: 'none', borderRadius: 8, cursor: testing ? 'not-allowed' : 'pointer' }}
+          >
+            {testing ? '接続確認中...' : '接続する'}
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
 
-  // localStorage デモモード時のデータ自動保存
-  useEffect(() => {
-    if (isLocalStorageMode) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks))
+// ─── Main App ──────────────────────────────────────────────────────────────
+export default function App() {
+  const [apiKey, setApiKey]       = useState(() => localStorage.getItem(API_KEY_STORAGE) || '')
+  const [tasks, setTasks]         = useState([])
+  const [title, setTitle]         = useState('')
+  const [deadline, setDeadline]   = useState('')
+  const [assignee, setAssignee]   = useState('human')
+  const [priority, setPriority]   = useState('medium')
+  const [aiContext, setAiContext]  = useState('')
+  const [error, setError]         = useState('')
+  const [loading, setLoading]     = useState(true)
+  const [showForm, setShowForm]   = useState(false)
+  const [filterAssignee, setFilter] = useState('all')
+  const [expandedId, setExpandedId] = useState(null)
+  const [connError, setConnError] = useState(false)
+
+  const fetchTasks = useCallback(async (key = apiKey) => {
+    setLoading(true)
+    setConnError(false)
+    try {
+      const files = await listTaskFiles(key)
+      const results = await Promise.all(files.map(f => readTask(key, f)))
+      setTasks(results.filter(Boolean))
+    } catch (e) {
+      console.error(e)
+      setConnError(true)
+    } finally {
+      setLoading(false)
     }
-  }, [tasks, isLocalStorageMode])
+  }, [apiKey])
 
-  // タスク新規追加
+  useEffect(() => {
+    if (apiKey) fetchTasks(apiKey)
+    else setLoading(false)
+  }, [apiKey])
+
+  if (!apiKey) {
+    return <ApiKeySetup onSave={key => { setApiKey(key); fetchTasks(key) }} />
+  }
+
   async function addTask(e) {
     e.preventDefault()
     if (!title.trim()) { setError('タスク名を入力してください'); return }
     if (!deadline)     { setError('締切日を選んでください'); return }
 
-    const newTaskData = {
+    const id = `task_${Date.now()}`
+    const newTask = {
+      id,
       title: title.trim(),
       deadline,
+      status: 'todo',
       assignee,
       priority,
       ai_context: aiContext,
+      tags: [],
+      memo: '',
+      created: new Date().toISOString().split('T')[0],
+      _filename: `${id}.md`,
     }
 
-    if (isLocalStorageMode) {
-      // localStorage デモモード
-      const newTask = {
-        id: `task_${Date.now()}`,
-        title: title.trim(),
-        deadline,
-        status: 'todo',
-        assignee,
-        priority,
-        ai_context: aiContext,
-        sources: [],
-        memo: '（デモモードのためメモの自動解析はありません。自由に追記できます）',
-        created: new Date().toISOString().split('T')[0],
-      }
+    try {
+      await writeTask(apiKey, newTask)
       setTasks(prev => [...prev, newTask])
-      setTitle('')
-      setDeadline('')
-      setAssignee('human')
-      setPriority('medium')
-      setAiContext('')
-      setError('')
-      setShowForm(false)
-    } else {
-      // API 連携モード
-      try {
-        const res = await fetch(`${API}/tasks`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(newTaskData),
-        })
-        if (res.ok) {
-          setTasks(await res.json())
-          setTitle('')
-          setDeadline('')
-          setAssignee('human')
-          setPriority('medium')
-          setAiContext('')
-          setError('')
-          setShowForm(false)
-        } else {
-          throw new Error()
-        }
-      } catch {
-        setError('サーバーエラーのため、一時的にローカル保存モードに切り替えます。もう一度お試しください。')
-        setIsLocal(true)
-      }
+      setTitle(''); setDeadline(''); setAssignee('human')
+      setPriority('medium'); setAiContext('')
+      setError(''); setShowForm(false)
+    } catch (err) {
+      setError('保存に失敗しました: ' + err.message)
     }
   }
 
-  // タスク移動（ステータス更新）
   async function moveTask(id, status) {
-    if (isLocalStorageMode) {
-      setTasks(prev => prev.map(t => t.id === id ? { ...t, status } : t))
-    } else {
-      try {
-        const res = await fetch(`${API}/tasks/${id}/status`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status }),
-        })
-        if (res.ok) {
-          setTasks(await res.json())
-        } else {
-          throw new Error()
-        }
-      } catch {
-        setIsLocal(true)
-        setTasks(prev => prev.map(t => t.id === id ? { ...t, status } : t))
-      }
+    const task = tasks.find(t => t.id === id)
+    if (!task) return
+    const updated = { ...task, status }
+    try {
+      await writeTask(apiKey, updated)
+      setTasks(prev => prev.map(t => t.id === id ? updated : t))
+    } catch (err) {
+      setError('更新に失敗: ' + err.message)
     }
   }
 
-  // タスク削除
   async function removeTask(id) {
-    if (isLocalStorageMode) {
+    const task = tasks.find(t => t.id === id)
+    if (!task) return
+    try {
+      await deleteTaskFile(apiKey, task._filename || `${id}.md`)
       setTasks(prev => prev.filter(t => t.id !== id))
-    } else {
-      try {
-        const res = await fetch(`${API}/tasks/${id}`, { method: 'DELETE' })
-        if (res.ok) {
-          setTasks(await res.json())
-        } else {
-          throw new Error()
-        }
-      } catch {
-        setIsLocal(true)
-        setTasks(prev => prev.filter(t => t.id !== id))
-      }
+    } catch (err) {
+      setError('削除に失敗: ' + err.message)
     }
   }
 
-  // アサインフィルターの適用
   const filteredTasks = filterAssignee === 'all'
     ? tasks
     : tasks.filter(t => (t.assignee || 'human') === filterAssignee)
@@ -222,12 +331,8 @@ export default function App() {
   const totalActive = filteredTasks.filter(t => normalizeStatus(t) !== 'done').length
 
   const selectStyle = {
-    padding: '8px 12px',
-    fontSize: 14,
-    border: '1px solid #CBD5E0',
-    borderRadius: 8,
-    outline: 'none',
-    background: '#fff',
+    padding: '8px 12px', fontSize: 14,
+    border: '1px solid #CBD5E0', borderRadius: 8, outline: 'none', background: '#fff',
   }
 
   return (
@@ -240,26 +345,45 @@ export default function App() {
           <span style={{ fontSize: 12, background: '#3182CE', color: '#fff', borderRadius: 20, padding: '2px 10px', fontWeight: 700 }}>
             未完了 {totalActive}件
           </span>
-          {/* 連動ステータスバッジ */}
           <span style={{
-            fontSize: 11,
-            fontWeight: 700,
-            background: isLocalStorageMode ? '#FEFCBF' : '#C6F6D5',
-            color: isLocalStorageMode ? '#975A16' : '#22543D',
-            border: `1px solid ${isLocalStorageMode ? '#D69E2E' : '#38A169'}`,
-            borderRadius: 20,
-            padding: '2px 10px'
+            fontSize: 11, fontWeight: 700,
+            background: connError ? '#FFF5F5' : '#C6F6D5',
+            color: connError ? '#C53030' : '#22543D',
+            border: `1px solid ${connError ? '#FC8181' : '#38A169'}`,
+            borderRadius: 20, padding: '2px 10px',
           }}>
-            {isLocalStorageMode ? '🟡 デモモード（ブラウザに保存）' : '🟢 Obsidian 連携中'}
+            {connError ? '🔴 Obsidian未接続' : '🟢 Obsidian連携中'}
           </span>
         </div>
-        <button
-          onClick={() => setShowForm(v => !v)}
-          style={{ background: '#3182CE', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 16px', fontWeight: 700, fontSize: 14, cursor: 'pointer' }}
-        >
-          ＋ タスク追加
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            onClick={() => fetchTasks()}
+            style={{ background: '#2D3748', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 12px', fontSize: 13, cursor: 'pointer' }}
+          >
+            ↺ 更新
+          </button>
+          <button
+            onClick={() => { localStorage.removeItem(API_KEY_STORAGE); setApiKey('') }}
+            style={{ background: '#2D3748', color: '#A0AEC0', border: 'none', borderRadius: 8, padding: '8px 12px', fontSize: 13, cursor: 'pointer' }}
+          >
+            ⚙
+          </button>
+          <button
+            onClick={() => setShowForm(v => !v)}
+            style={{ background: '#3182CE', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 16px', fontWeight: 700, fontSize: 14, cursor: 'pointer' }}
+          >
+            ＋ タスク追加
+          </button>
+        </div>
       </div>
+
+      {/* 接続エラーバナー */}
+      {connError && (
+        <div style={{ background: '#FFF5F5', border: '1px solid #FC8181', padding: '10px 24px', fontSize: 13, color: '#C53030', display: 'flex', alignItems: 'center', gap: 8 }}>
+          ⚠️ Obsidianに接続できません。Obsidianが起動中でLocal REST APIプラグインが有効か確認してください。
+          <button onClick={() => fetchTasks()} style={{ marginLeft: 'auto', fontSize: 12, padding: '4px 12px', background: '#FED7D7', border: '1px solid #FC8181', borderRadius: 6, cursor: 'pointer', color: '#C53030', fontWeight: 700 }}>再接続</button>
+        </div>
+      )}
 
       {/* アサインフィルター */}
       <div style={{ background: '#fff', borderBottom: '1px solid #E2E8F0', padding: '8px 24px', display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -281,7 +405,7 @@ export default function App() {
         ))}
       </div>
 
-      {/* 追加フォーム（折りたたみ） */}
+      {/* 追加フォーム */}
       {showForm && (
         <div style={{ background: '#fff', borderBottom: '1px solid #E2E8F0', padding: '16px 24px' }}>
           <form onSubmit={addTask} style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
@@ -306,17 +430,13 @@ export default function App() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <label style={{ fontSize: 12, color: '#718096', fontWeight: 600 }}>担当者</label>
               <select style={selectStyle} value={assignee} onChange={e => setAssignee(e.target.value)}>
-                {Object.entries(ASSIGNEES).map(([k, v]) => (
-                  <option key={k} value={k}>{v.label}</option>
-                ))}
+                {Object.entries(ASSIGNEES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
               </select>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <label style={{ fontSize: 12, color: '#718096', fontWeight: 600 }}>優先度</label>
               <select style={selectStyle} value={priority} onChange={e => setPriority(e.target.value)}>
-                {Object.entries(PRIORITIES).map(([k, v]) => (
-                  <option key={k} value={k}>{v.label}</option>
-                ))}
+                {Object.entries(PRIORITIES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
               </select>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: '2 1 280px' }}>
@@ -328,7 +448,10 @@ export default function App() {
                 onChange={e => setAiContext(e.target.value)}
               />
             </div>
-            <button style={{ padding: '8px 20px', fontWeight: 700, fontSize: 14, background: '#3182CE', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', height: 38 }} type="submit">
+            <button
+              style={{ padding: '8px 20px', fontWeight: 700, fontSize: 14, background: '#3182CE', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', height: 38 }}
+              type="submit"
+            >
               追加
             </button>
             {error && <p style={{ color: '#E53E3E', fontSize: 13, width: '100%', margin: 0 }}>{error}</p>}
@@ -345,7 +468,6 @@ export default function App() {
             const colTasks = byStatus(col.key)
             return (
               <div key={col.key} style={{ flex: '1 1 300px', minWidth: 280, background: '#fff', borderRadius: 12, boxShadow: '0 1px 4px rgba(0,0,0,0.08)', overflow: 'hidden' }}>
-                {/* 列ヘッダー */}
                 <div style={{ padding: '12px 16px', borderBottom: '2px solid ' + col.color, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                   <span style={{ fontWeight: 700, fontSize: 14, color: col.color }}>{col.label}</span>
                   <span style={{ fontSize: 12, fontWeight: 700, background: col.bg, color: col.color, borderRadius: 20, padding: '2px 10px', border: '1px solid ' + col.color }}>
@@ -353,7 +475,6 @@ export default function App() {
                   </span>
                 </div>
 
-                {/* タスクカード */}
                 <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8, minHeight: 60 }}>
                   {colTasks.length === 0 && (
                     <p style={{ textAlign: 'center', color: '#CBD5E0', fontSize: 13, margin: '12px 0' }}>なし</p>
@@ -364,7 +485,8 @@ export default function App() {
                     const asgn = ASSIGNEES[task.assignee] || ASSIGNEES['human']
                     const prio = PRIORITIES[task.priority] || PRIORITIES['medium']
                     const isExpanded = expandedId === task.id
-                    const hasDetail = !!(task.ai_context || (task.sources && task.sources.length) || task.memo)
+                    const sources = Array.isArray(task.sources) ? task.sources : []
+                    const hasDetail = !!(task.ai_context || sources.length || task.memo)
 
                     return (
                       <div
@@ -382,7 +504,6 @@ export default function App() {
                           transition: 'box-shadow 0.15s, border-color 0.15s',
                         }}
                       >
-                        {/* タスク名 + 優先度 */}
                         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 6, marginBottom: 6 }}>
                           <div style={{ fontWeight: 600, fontSize: 14, textDecoration: isDone ? 'line-through' : 'none', color: isDone ? '#A0AEC0' : '#1A202C', flex: 1 }}>
                             {task.title}
@@ -392,7 +513,6 @@ export default function App() {
                           </span>
                         </div>
 
-                        {/* アサイニーバッジ + 締切 */}
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 4 }}>
                           <span style={{ fontSize: 11, background: asgn.bg, color: asgn.color, border: `1px solid ${asgn.color}`, borderRadius: 20, padding: '1px 8px', fontWeight: 700 }}>
                             {asgn.label}
@@ -403,7 +523,6 @@ export default function App() {
                           <span style={{ fontSize: 11, color: '#A0AEC0', marginLeft: 'auto' }}>{task.deadline}</span>
                         </div>
 
-                        {/* AIへの指示（折りたたみ時） */}
                         {hasDetail && !isExpanded && (
                           <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: '#718096', background: '#F7FAFC', border: '1px solid #E2E8F0', borderRadius: 6, padding: '4px 8px', marginBottom: 6 }}>
                             <span style={{ fontStyle: 'italic', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -413,7 +532,6 @@ export default function App() {
                           </div>
                         )}
 
-                        {/* アコーディオン展開表示 */}
                         {isExpanded && (
                           <div style={{ marginBottom: 8, display: 'flex', flexDirection: 'column', gap: 8 }} onClick={e => e.stopPropagation()}>
                             {task.ai_context && (
@@ -422,38 +540,30 @@ export default function App() {
                                 <div style={{ fontSize: 12, color: '#2D3748', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{task.ai_context}</div>
                               </div>
                             )}
-
-                            {task.sources && task.sources.length > 0 && (
+                            {sources.length > 0 && (
                               <div style={{ background: '#fff', border: '1px solid #E2E8F0', borderRadius: 6, padding: '8px 10px' }}>
-                                <div style={{ fontSize: 10, fontWeight: 700, color: '#4A5568', marginBottom: 6, letterSpacing: 0.3 }}>参照ノート（{task.sources.length}）</div>
+                                <div style={{ fontSize: 10, fontWeight: 700, color: '#4A5568', marginBottom: 6 }}>参照ノート（{sources.length}）</div>
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                                  {task.sources.map((src, i) => (
-                                    <a
-                                      key={i}
-                                      href={obsidianUri(src)}
-                                      title={`Obsidian で開く: ${src}`}
-                                      style={{ fontSize: 11, fontFamily: 'ui-monospace, Menlo, monospace', color: '#2B6CB0', background: '#EBF8FF', border: '1px solid #BEE3F8', borderRadius: 4, padding: '3px 8px', textDecoration: 'none', wordBreak: 'break-all' }}
-                                    >
+                                  {sources.map((src, i) => (
+                                    <a key={i} href={obsidianUri(src)} title={`Obsidian で開く: ${src}`}
+                                      style={{ fontSize: 11, fontFamily: 'monospace', color: '#2B6CB0', background: '#EBF8FF', border: '1px solid #BEE3F8', borderRadius: 4, padding: '3px 8px', textDecoration: 'none', wordBreak: 'break-all' }}>
                                       🔗 {sourceLabel(src)}
                                     </a>
                                   ))}
                                 </div>
-                                <div style={{ fontSize: 10, color: '#A0AEC0', marginTop: 6 }}>クリックするとローカルの Obsidian で開きます</div>
+                                <div style={{ fontSize: 10, color: '#A0AEC0', marginTop: 6 }}>クリックするとObsidianで開きます</div>
                               </div>
                             )}
-
                             {task.memo && (
                               <div style={{ background: '#fff', border: '1px solid #E2E8F0', borderRadius: 6, padding: '8px 10px' }}>
-                                <div style={{ fontSize: 10, fontWeight: 700, color: '#4A5568', marginBottom: 4, letterSpacing: 0.3 }}>メモ本文</div>
+                                <div style={{ fontSize: 10, fontWeight: 700, color: '#4A5568', marginBottom: 4 }}>メモ本文</div>
                                 <div style={{ fontSize: 12, color: '#4A5568', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{task.memo}</div>
                               </div>
                             )}
-
-                            <div style={{ fontSize: 10, color: '#A0AEC0', textAlign: 'right', marginTop: 4 }} onClick={() => setExpandedId(null)}>閉じる ▴</div>
+                            <div style={{ fontSize: 10, color: '#A0AEC0', textAlign: 'right', marginTop: 4, cursor: 'pointer' }} onClick={() => setExpandedId(null)}>閉じる ▴</div>
                           </div>
                         )}
 
-                        {/* ステータス移動ボタン */}
                         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }} onClick={e => e.stopPropagation()}>
                           {COLUMNS.filter(c => c.key !== col.key).map(c => (
                             <button
