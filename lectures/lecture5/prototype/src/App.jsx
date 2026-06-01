@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 
-const OBSIDIAN_API = 'http://localhost:27123'
+const OBSIDIAN_API = 'https://localhost:27124'
 const TASKS_PATH = 'Tasks'
 const API_KEY_STORAGE = 'obsidian-local-rest-api-key'
 
