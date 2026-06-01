@@ -32,17 +32,22 @@ app.post('/tasks', (req, res) => {
   const { title, deadline } = req.body
   if (!title || !deadline) return res.status(400).json({ error: 'title and deadline required' })
   const tasks = loadTasks()
-  tasks.push({ id: crypto.randomUUID(), title, deadline, done: false, createdAt: new Date().toISOString() })
+  tasks.push({ id: crypto.randomUUID(), title, deadline, status: 'todo', done: false, createdAt: new Date().toISOString() })
   saveTasks(tasks)
   res.json(tasks)
 })
 
-app.patch('/tasks/:id/toggle', (req, res) => {
+const VALID_STATUSES = ['todo', 'in_progress', 'done']
+
+app.patch('/tasks/:id/status', (req, res) => {
+  const { status } = req.body
+  if (!VALID_STATUSES.includes(status)) return res.status(400).json({ error: 'invalid status' })
   const tasks = loadTasks()
   const task = tasks.find(t => t.id === req.params.id)
   if (!task) return res.status(404).json({ error: 'not found' })
-  task.done = !task.done
-  task.doneAt = task.done ? new Date().toISOString() : null
+  task.status = status
+  task.done = status === 'done'
+  task.doneAt = status === 'done' ? new Date().toISOString() : null
   saveTasks(tasks)
   res.json(tasks)
 })
