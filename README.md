@@ -9,7 +9,8 @@
 ```
 lectures/
 ├── lecture3/    第3回(2026-05-07)— 自分のやりたいことを深掘って設計する(VPC)
-├── lecture4/    第4回(将来追加)
+├── lecture4/    第4回
+├── lecture5/    第5回(2026-05-28)— プロトタイプ開発 (Vite + JS + CSS)
 └── lecture[N]/  各回が累積
 ```
 
@@ -43,6 +44,7 @@ lectures/
 |---|---|---|---|
 | 3 | 2026-05-07 | 自分のやりたいことを深掘って設計する(VPC) | [`lectures/lecture3/`](./lectures/lecture3/) |
 | 4 | 2026-05-14 | 技術① AIの全体像 | (準備中) |
+| 5 | 2026-05-28 | プロトタイプ開発 | [`lectures/lecture5/`](./lectures/lecture5/) |
 
 ---
 
