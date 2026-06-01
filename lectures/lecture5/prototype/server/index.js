@@ -17,6 +17,36 @@ function ensureDir() {
 }
 
 /**
+ * ai_context や frontmatter から「このタスクの根拠になったファイル」を抽出する。
+ * - frontmatter の sources リスト（明示指定）を最優先
+ * - ai_context 本文中の `xxx/yyy.md` 形式のパス
+ * - ai_context 本文中の [[wikilink]]
+ * 重複を除いて配列で返す。
+ */
+function extractSources(aiContext, explicitSources) {
+  const out = []
+  const push = (s) => {
+    const v = String(s || '').trim()
+    if (v && !out.includes(v)) out.push(v)
+  }
+
+  if (Array.isArray(explicitSources)) explicitSources.forEach(push)
+  else if (typeof explicitSources === 'string') push(explicitSources)
+
+  const text = String(aiContext || '')
+
+  // [[wikilink]] 形式
+  const wiki = text.match(/\[\[([^\]]+)\]\]/g) || []
+  wiki.forEach(w => push(w.replace(/^\[\[|\]\]$/g, '')))
+
+  // 日本語フォルダ名・英数字・スラッシュを含む .md パス
+  const paths = text.match(/[^\s、。（）()「」『』]+\.md/g) || []
+  paths.forEach(push)
+
+  return out
+}
+
+/**
  * Tasks フォルダ内の .md ファイルをすべて読み込んで配列で返す
  * _ から始まるファイル（_README.md 等）は除外
  */
@@ -27,7 +57,7 @@ function readAllTasks() {
     .map(filename => {
       try {
         const raw = fs.readFileSync(path.join(TASKS_DIR, filename), 'utf8')
-        const { data } = matter(raw)
+        const { data, content } = matter(raw)
         if (!data.id || !data.title) return null
 
         // gray-matter は YYYY-MM-DD を Date オブジェクトに変換することがある
@@ -44,6 +74,11 @@ function readAllTasks() {
           deadline,
           status: data.status || 'todo',
           tags: data.tags || [],
+          assignee: data.assignee || 'human',
+          priority: data.priority || 'medium',
+          ai_context: data.ai_context || '',
+          sources: extractSources(data.ai_context, data.sources),
+          memo: String(content || '').trim(),
           created,
         }
       } catch {
@@ -75,6 +110,9 @@ function writeTaskFile(task) {
     deadline: task.deadline,
     status: task.status,
     tags: task.tags || [],
+    assignee: task.assignee || 'human',
+    priority: task.priority || 'medium',
+    ai_context: task.ai_context || '',
     created: task.created,
     updated: new Date().toISOString().split('T')[0],
   })
@@ -90,7 +128,7 @@ app.get('/tasks', (_req, res) => {
 
 // POST /tasks — タスク新規作成
 app.post('/tasks', (req, res) => {
-  const { title, deadline } = req.body
+  const { title, deadline, assignee, priority, ai_context } = req.body
   if (!title || !deadline) {
     return res.status(400).json({ error: 'title と deadline は必須です' })
   }
@@ -101,6 +139,9 @@ app.post('/tasks', (req, res) => {
     deadline,
     status: 'todo',
     tags: [],
+    assignee: assignee || 'human',
+    priority: priority || 'medium',
+    ai_context: ai_context || '',
     created: new Date().toISOString().split('T')[0],
   })
   res.status(201).json(readAllTasks())

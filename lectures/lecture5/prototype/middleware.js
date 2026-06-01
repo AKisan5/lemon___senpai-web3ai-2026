@@ -1,34 +1,21 @@
 /**
- * Vercel Edge Middleware
+ * Vercel Edge Middleware — Basic Auth
  *
- * 現在は認証なし — プロトタイプ UI は誰でも閲覧可能。
- * タスクデータは localhost:3001（ローカルサーバー）からのみ取得するため、
- * 自分のPC以外からはデータに一切アクセスできない。
+ * Vercel ダッシュボード → Settings → Environment Variables に設定:
+ *   AUTH_USER = aki
+ *   AUTH_PASS = （自分で決めたパスワード）
  *
- * もし将来的に UI 自体も非公開にしたい場合:
- *   AUTH_USER と AUTH_PASS を Vercel 環境変数に設定して
- *   下のコメントアウト部分を有効にする。
+ * 両方未設定の場合は認証をスキップする（ローカル開発用）。
  */
 export const config = {
   matcher: ['/((?!_next/static|_next/image|favicon\\.ico).*)'],
 }
 
-export default function middleware(_request) {
-  // 現在は全リクエストをそのまま通す
-  return
-}
-
-/*
-── Basic Auth を有効にする場合 ─────────────────────────────────
-Vercel ダッシュボード → Settings → Environment Variables に設定:
-  AUTH_USER = aki
-  AUTH_PASS = （ランダムな文字列）
-
-そして上の middleware 関数を以下に差し替える:
-
 export default function middleware(request) {
   const AUTH_USER = process.env.AUTH_USER
   const AUTH_PASS = process.env.AUTH_PASS
+
+  // 環境変数が未設定 = 開発環境 → 認証スキップ
   if (!AUTH_USER || !AUTH_PASS) return
 
   const authHeader = request.headers.get('authorization')
@@ -41,4 +28,3 @@ export default function middleware(request) {
     headers: { 'WWW-Authenticate': 'Basic realm="Private"' },
   })
 }
-─────────────────────────────────────────────────────────────── */
