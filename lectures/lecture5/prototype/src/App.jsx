@@ -26,7 +26,6 @@ function urgencyLabel(days) {
   return `あと${days}日`
 }
 
-// タスクに status がない場合（旧データ）は done フラグから補完
 function normalizeStatus(task) {
   if (task.status) return task.status
   return task.done ? 'done' : 'todo'
@@ -39,13 +38,20 @@ export default function App() {
   const [error, setError]       = useState('')
   const [loading, setLoading]   = useState(true)
   const [showForm, setShowForm] = useState(false)
+  // サーバーに繋がっているかどうか（自分のPCでのみ true になる）
+  const [connected, setConnected] = useState(false)
 
   async function fetchTasks() {
     try {
       const res = await fetch(`${API}/tasks`)
-      setTasks(await res.json())
+      if (res.ok) {
+        setTasks(await res.json())
+        setConnected(true)
+      }
     } catch {
-      setError('サーバーに接続できません。cd server && npm run dev を実行してください。')
+      // ローカルサーバー未起動 = タスクなし（エラー表示しない）
+      setTasks([])
+      setConnected(false)
     } finally {
       setLoading(false)
     }
@@ -92,20 +98,24 @@ export default function App() {
       <div style={{ background: '#1A202C', color: '#fff', padding: '14px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <span style={{ fontSize: 20, fontWeight: 700 }}>📅 締め切り管理</span>
-          <span style={{ fontSize: 12, background: '#3182CE', color: '#fff', borderRadius: 20, padding: '2px 10px', fontWeight: 700 }}>
-            未完了 {totalActive}件
-          </span>
+          {connected && (
+            <span style={{ fontSize: 12, background: '#3182CE', color: '#fff', borderRadius: 20, padding: '2px 10px', fontWeight: 700 }}>
+              未完了 {totalActive}件
+            </span>
+          )}
         </div>
-        <button
-          onClick={() => setShowForm(v => !v)}
-          style={{ background: '#3182CE', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 16px', fontWeight: 700, fontSize: 14, cursor: 'pointer' }}
-        >
-          ＋ タスク追加
-        </button>
+        {connected && (
+          <button
+            onClick={() => setShowForm(v => !v)}
+            style={{ background: '#3182CE', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 16px', fontWeight: 700, fontSize: 14, cursor: 'pointer' }}
+          >
+            ＋ タスク追加
+          </button>
+        )}
       </div>
 
       {/* 追加フォーム（折りたたみ） */}
-      {showForm && (
+      {showForm && connected && (
         <div style={{ background: '#fff', borderBottom: '1px solid #E2E8F0', padding: '16px 24px' }}>
           <form onSubmit={addTask} style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 200px' }}>
@@ -153,9 +163,9 @@ export default function App() {
 
                 {/* タスクカード */}
                 <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8, minHeight: 60 }}>
-                  {colTasks.length === 0 && (
-                    <p style={{ textAlign: 'center', color: '#CBD5E0', fontSize: 13, margin: '12px 0' }}>なし</p>
-                  )}
+                  <p style={{ textAlign: 'center', color: '#CBD5E0', fontSize: 13, margin: '12px 0' }}>
+                    {colTasks.length === 0 ? 'なし' : ''}
+                  </p>
                   {colTasks.map(task => {
                     const days = daysLeft(task.deadline)
                     const isDone = col.key === 'done'
@@ -168,18 +178,15 @@ export default function App() {
                         padding: '10px 12px',
                         opacity: isDone ? 0.75 : 1,
                       }}>
-                        {/* タイトル */}
                         <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4, textDecoration: isDone ? 'line-through' : 'none', color: isDone ? '#A0AEC0' : '#1A202C' }}>
                           {task.title}
                         </div>
-                        {/* 締切バッジ */}
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
                           <span style={{ fontSize: 11, background: urgencyColor(days), color: '#fff', borderRadius: 20, padding: '1px 8px', fontWeight: 700 }}>
                             {urgencyLabel(days)}
                           </span>
                           <span style={{ fontSize: 11, color: '#A0AEC0' }}>{task.deadline}</span>
                         </div>
-                        {/* ステータス移動ボタン */}
                         <div style={{ display: 'flex', gap: 4, marginTop: 8, flexWrap: 'wrap' }}>
                           {COLUMNS.filter(c => c.key !== col.key).map(c => (
                             <button
