@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
 
-const OBSIDIAN_API = 'https://localhost:27124'
+// 開発時（npm run dev）は Vite の dev プロキシ（vite.config.js）経由で接続し、
+// 自己署名証明書の問題を回避する。本番ビルド（Vercel 等）ではプロキシが無いため
+// 直接 HTTPS エンドポイントを叩く（ユーザーは一度だけ証明書を承認する必要がある）。
+const OBSIDIAN_API = import.meta.env.DEV ? '/obsidian' : 'https://localhost:27124'
 const TASKS_PATH = 'Tasks'
 const API_KEY_STORAGE = 'obsidian-local-rest-api-key'
 
