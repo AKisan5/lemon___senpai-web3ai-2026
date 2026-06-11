@@ -89,10 +89,11 @@ ${task.memo || ''}
 
 // ─── Obsidian Local REST API helpers ─────────────────────────────────────
 function obsFetch(path, apiKey, options = {}) {
+  const cleanKey = String(apiKey || '').trim().replace(/^bearer\s+/i, '')
   return fetch(`${OBSIDIAN_API}/${path}`, {
     ...options,
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${cleanKey}`,
       ...options.headers,
     },
   })
@@ -169,14 +170,15 @@ function ApiKeySetup({ onSave }) {
 
   async function handleSubmit(e) {
     e.preventDefault()
-    if (!key.trim()) { setError('APIキーを入力してください'); return }
+    const cleanKey = key.trim().replace(/^bearer\s+/i, '')
+    if (!cleanKey) { setError('APIキーを入力してください'); return }
     setTesting(true)
     setError('')
     try {
-      const res = await obsFetch(`vault/${TASKS_PATH}/`, key.trim())
+      const res = await obsFetch(`vault/${TASKS_PATH}/`, cleanKey)
       if (res.ok || res.status === 404) {
-        localStorage.setItem(API_KEY_STORAGE, key.trim())
-        onSave(key.trim())
+        localStorage.setItem(API_KEY_STORAGE, cleanKey)
+        onSave(cleanKey)
       } else if (res.status === 401) {
         setError('APIキーが正しくありません')
       } else {
